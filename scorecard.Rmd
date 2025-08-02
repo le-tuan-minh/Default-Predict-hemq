@@ -1,0 +1,784 @@
+---
+title: "Untitled"
+author: "Lê Tuấn Minh - 11224210"
+date: "2025-06-12"
+output: word_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(readxl)
+```
+
+```{r}
+dat <- read_excel("D:/Python/hmeq.xlsx")
+```
+
+```{r}
+library(dplyr)
+
+dat <- dat %>%
+  select(-gDEBTINC)
+```
+
+```{r}
+str(dat)
+```
+```{r}
+head(dat)
+```
+```{r}
+# Chọn các cột số từ dataframe của bạn
+numeric_cols <- unlist(lapply(dat, is.numeric))
+dat_numeric <- dat[, numeric_cols]
+```
+
+```{r}
+# Tính toán ma trận tương quan
+correlation_matrix <- cor(dat_numeric, use = "pairwise.complete.obs")
+
+# In ma trận tương quan ra console để xem
+print(correlation_matrix)
+```
+```{r}
+dat <- dat %>%
+  select(-MORTDUE)
+```
+
+```{r}
+# Bước 0: Cài đặt và tải các gói cần thiết
+
+library(dplyr)
+library(caret)      # Để chia train/test stratified
+library(scorecard)  # Cho Optimal Binning và Scorecard
+library(ggplot2)    # Cho biểu đồ (tùy chọn)
+
+# Kiểm tra lại cấu trúc dữ liệu sau khi loại bỏ biến
+str(dat)
+summary(dat)
+```
+
+
+```{r}
+# ====================================================================
+# Bước 1: Chuẩn bị dữ liệu ban đầu và xử lý biến phân loại
+# ====================================================================
+
+# Chuyển biến mục tiêu BAD sang dạng factor
+dat$BAD <- as.factor(dat$BAD)
+
+# Chuyển các biến phân loại khác sang dạng factor
+# REASON và JOB là các biến ký tự, cần chuyển sang factor
+dat$REASON <- as.factor(dat$REASON)
+dat$JOB <- as.factor(dat$JOB)
+```
+
+
+```{r}
+# ====================================================================
+# Bước 2: Chia dữ liệu Train/Test (Stratified 80:20)
+# ====================================================================
+
+# Đặt seed để đảm bảo kết quả có thể tái lập
+set.seed(123)
+
+# Tạo chỉ mục cho tập huấn luyện sử dụng stratified sampling
+# p = 0.8 cho 80% train, list = FALSE để trả về vector chỉ mục
+trainIndex <- createDataPartition(dat$BAD, p = 0.8, list = FALSE, times = 1)
+
+# Tạo tập huấn luyện và tập kiểm tra
+train_dat <- dat[trainIndex, ]
+test_dat <- dat[-trainIndex, ]
+
+# Kiểm tra tỷ lệ BAD trong mỗi tập để đảm bảo stratified sampling hoạt động
+prop.table(table(train_dat$BAD))
+prop.table(table(test_dat$BAD))
+prop.table(table(dat$BAD)) # So sánh với tập gốc
+
+cat("Kích thước tập huấn luyện:", nrow(train_dat), "\n")
+cat("Kích thước tập kiểm tra:", nrow(test_dat), "\n")
+```
+```{r}
+# ====================================================================
+# Bước 3: Optimal Binning (WoE/IV) trên tập huấn luyện
+# ====================================================================
+
+# Hàm `woebin` từ gói `scorecard` sẽ thực hiện optimal binning
+# Nó tự động xử lý biến liên tục và phân loại, và xử lý NA
+# y: tên biến mục tiêu
+# positive: giá trị của biến mục tiêu đại diện cho "bad" (ví dụ: 1)
+# chk_skip: các biến bỏ qua (ví dụ: ID nếu có, hoặc biến mục tiêu)
+# method: "tree" (sử dụng cây quyết định), "chimerge" (phân cụm dựa trên chi-square), "kmeans"
+# bin_num_limit: giới hạn số lượng bin (thường 5-10)
+# print_info: có in thông tin quá trình binning không
+# stop_limit: ngưỡng dừng cho cây quyết định (tùy chọn)
+# na.omit = FALSE: GIỮ NA VÀ ĐƯA VÀO 1 BIN RIÊNG (rất quan trọng cho yêu cầu của bạn)
+
+# Danh sách các biến dự đoán (loại bỏ biến mục tiêu BAD)
+predictor_vars <- names(train_dat)[!names(train_dat) %in% c("BAD")]
+
+# Thực hiện binning
+# Hàm woebin sẽ trả về một list các data.frame, mỗi df là thông tin binning cho một biến
+bins <- woebin(train_dat,
+               y = "BAD",
+               x = predictor_vars, # Các biến dự đoán
+               positive = "1",     # Chỉ ra rằng '1' là trường hợp "bad"
+               bin_num_limit = 6,  # Giới hạn số lượng bin, bạn có thể điều chỉnh
+               na.omit = FALSE,    # Giữ NA và tạo bin riêng cho chúng
+               print_info = TRUE)  # In thông tin binning
+
+# Bạn có thể xem kết quả binning cho từng biến
+# Ví dụ: bins$LOAN
+# plot(bins$LOAN) # Để trực quan hóa các bin cho biến LOAN
+```
+
+
+```{r}
+# ====================================================================
+# Bước 4: Áp dụng Binning/WoE lên cả tập Train và Test
+# ====================================================================
+
+# Hàm woebin_ply áp dụng các quy tắc binning đã học từ `woebin`
+# và chuyển đổi các biến gốc thành các giá trị WoE tương ứng.
+train_woe <- woebin_ply(train_dat, bins)
+test_woe <- woebin_ply(test_dat, bins)
+
+# Kiểm tra cấu trúc của dữ liệu sau khi chuyển đổi WoE
+str(train_woe)
+str(test_woe)
+
+# Các cột mới có hậu tố "_WoE" sẽ xuất hiện.
+# Biến BAD vẫn còn nguyên.
+```
+```{r}
+# ====================================================================
+# Bước 5: Xây dựng mô hình Logistic Regression
+# ====================================================================
+
+# Chuẩn bị công thức mô hình
+# Biến mục tiêu là BAD, các biến dự đoán là tất cả các biến _WoE
+# Lấy tên các cột WoE
+woe_vars <- names(train_woe)[grep("_woe$", names(train_woe))]
+formula_str <- paste("BAD ~", paste(woe_vars, collapse = " + "))
+model_formula <- as.formula(formula_str)
+
+cat("\nCông thức mô hình Logistic Regression:\n")
+print(model_formula)
+
+# Xây dựng mô hình
+logistic_model <- glm(model_formula, data = train_woe, family = binomial(link = "logit"))
+
+# Xem tóm tắt mô hình
+summary(logistic_model)
+```
+
+
+```{r}
+# ====================================================================
+# Bước 6: Đánh giá mô hình (trên tập Test)
+# ====================================================================
+
+# Dự đoán xác suất "bad" trên tập kiểm tra
+test_pred_prob <- predict(logistic_model, newdata = test_woe, type = "response")
+
+# Chuyển đổi xác suất thành dự đoán lớp (ví dụ: ngưỡng 0.5)
+test_pred_class <- ifelse(test_pred_prob > 0.5, "1", "0")
+test_pred_class <- as.factor(test_pred_class)
+
+# Tạo confusion matrix
+confusionMatrix(test_pred_class, test_woe$BAD, positive = "1")
+
+# Tính toán ROC curve và AUC
+library(pROC)
+roc_obj <- roc(response = test_woe$BAD, predictor = test_pred_prob)
+plot(roc_obj, main = "ROC Curve on Test Set")
+auc(roc_obj)
+```
+```{r}
+# ====================================================================
+# Bước 6: Đánh giá mô hình (trên tập Test) - Tối ưu hóa Ngưỡng
+# ====================================================================
+
+# Dự đoán xác suất "bad" trên tập kiểm tra (như trước)
+test_pred_prob <- predict(logistic_model, newdata = test_woe, type = "response")
+
+# Tạo một sequence các ngưỡng để thử
+thresholds <- seq(0.05, 0.95, by = 0.01) # Thử từ 5% đến 95% với bước nhảy 1%
+
+# Khởi tạo dataframe để lưu kết quả Precision, Recall, F1-score cho mỗi ngưỡng
+results_df <- data.frame(
+  threshold = numeric(),
+  accuracy = numeric(),
+  precision = numeric(),
+  recall = numeric(),
+  f1_score = numeric(),
+  stringsAsFactors = FALSE
+)
+
+# Lặp qua từng ngưỡng để tính toán các độ đo
+for (thresh in thresholds) {
+  # Chuyển đổi xác suất thành dự đoán lớp với ngưỡng hiện tại
+  test_pred_class_thresh <- ifelse(test_pred_prob > thresh, "1", "0")
+  test_pred_class_thresh <- as.factor(test_pred_class_thresh)
+
+  # Đảm bảo các levels của dự đoán khớp với reference
+  # Nếu không có dự đoán nào là '1' (khi ngưỡng quá cao), caret sẽ báo lỗi
+  if (nlevels(test_pred_class_thresh) < nlevels(test_woe$BAD)) {
+    levels(test_pred_class_thresh) <- levels(test_woe$BAD)
+  }
+
+  # Tạo confusion matrix
+  cm <- confusionMatrix(test_pred_class_thresh, test_woe$BAD, positive = "1")
+
+  # Trích xuất Precision, Recall, F1-score
+  current_accuracy <- cm$overall["Accuracy"]
+  current_precision <- cm$byClass["Pos Pred Value"] # Precision
+  current_recall <- cm$byClass["Sensitivity"]       # Recall
+
+  # Tính F1-score
+  current_f1 <- (2 * current_precision * current_recall) / (current_precision + current_recall)
+
+  # Thêm vào dataframe kết quả
+  results_df <- rbind(results_df, data.frame(
+    threshold = thresh,
+    accuracy = current_accuracy,
+    precision = current_precision,
+    recall = current_recall,
+    f1_score = current_f1
+  ))
+}
+
+# Loại bỏ các hàng có NA (nếu F1-score không thể tính được do Precision/Recall là NA,
+# thường xảy ra khi không có dự đoán nào là "1" hoặc không có "1" thực sự trong tập test)
+results_df <- na.omit(results_df)
+
+# Tìm ngưỡng tối đa hóa F1-score
+optimal_threshold_f1 <- results_df$threshold[which.max(results_df$f1_score)]
+max_f1_score <- max(results_df$f1_score)
+
+cat("\n------------------------------------------------\n")
+cat("Phân tích Ngưỡng Tối ưu hóa F1-score:\n")
+cat("Ngưỡng tối ưu F1-score:", optimal_threshold_f1, "\n")
+cat("F1-score tối đa:", max_f1_score, "\n")
+
+# Lấy các độ đo tại ngưỡng tối ưu
+optimal_metrics_f1 <- results_df %>%
+  filter(threshold == optimal_threshold_f1)
+print(optimal_metrics_f1)
+
+cat("\n------------------------------------------------\n")
+
+# ====================================================================
+# Trực quan hóa F1-score, Precision, Recall theo ngưỡng
+# ====================================================================
+library(ggplot2)
+library(tidyr) # Để sử dụng pivot_longer
+
+# Chuyển đổi dataframe sang định dạng dài để dễ vẽ biểu đồ
+plot_data <- results_df %>%
+  pivot_longer(
+    cols = c(precision, recall, f1_score),
+    names_to = "metric",
+    values_to = "value"
+  )
+
+ggplot(plot_data, aes(x = threshold, y = value, color = metric)) +
+  geom_line(size = 1) +
+  geom_point(aes(x = optimal_threshold_f1, y = max_f1_score), color = "red", size = 3, shape = 8,
+             data = data.frame(optimal_threshold_f1, max_f1_score, metric = "f1_score", value = max_f1_score)) +
+  labs(
+    title = "Precision, Recall, and F1-score vs. Threshold",
+    x = "Threshold",
+    y = "Value",
+    color = "Metric"
+  ) +
+  scale_color_manual(values = c("precision" = "blue", "recall" = "green", "f1_score" = "red")) +
+  theme_minimal() +
+  geom_vline(xintercept = optimal_threshold_f1, linetype = "dashed", color = "red") +
+  annotate("text", x = optimal_threshold_f1 + 0.05, y = max_f1_score,
+           label = paste0("Optimal Threshold: ", round(optimal_threshold_f1, 2)),
+           color = "red", hjust = 0)
+
+# ====================================================================
+# Áp dụng ngưỡng tối ưu và xem Confusion Matrix cuối cùng
+# ====================================================================
+test_pred_class_optimal <- ifelse(test_pred_prob > optimal_threshold_f1, "1", "0")
+test_pred_class_optimal <- as.factor(test_pred_class_optimal)
+
+# Đảm bảo các levels của dự đoán khớp với reference
+if (nlevels(test_pred_class_optimal) < nlevels(test_woe$BAD)) {
+  levels(test_pred_class_optimal) <- levels(test_woe$BAD)
+}
+
+cat("\nConfusion Matrix với ngưỡng tối ưu F1-score (", optimal_threshold_f1, "):\n")
+confusionMatrix(test_pred_class_optimal, test_woe$BAD, positive = "1")
+```
+
+
+```{r}
+# Bước 7: Tính điểm Scorecard (CẬP NHẬT CHÍNH XÁC DỰA TRÊN TÀI LIỆU CỦA BẠN)
+# ====================================================================
+
+# Hàm `scorecard` trong phiên bản 0.4.4 có các tham số points0, odds0, pdo.
+# Chúng ta sẽ sử dụng các tên tham số chính xác này.
+# Ví dụ: đặt base_point = 600, pdo = 20, odds = 50
+card <- scorecard(bins,
+                  logistic_model,
+                  points0 = 600,  # Tên tham số đúng là points0
+                  pdo = 50,       # Tên tham số đúng là pdo
+                  odds0 = 1/19)   # Tên tham số đúng là odds0 (ví dụ 1/50 để có odds là 50)
+                                  # Lưu ý: odds0 = p/(1-p). Nếu bạn muốn odds = 50, thì odds0 = 50.
+                                  # Nếu odds = 1/19 là mặc định, và bạn muốn odds là 50, thì chỉ cần đặt odds0 = 50.
+
+# In bảng điểm scorecard (giờ đây sẽ phản ánh các giá trị points0, odds0, pdo bạn đã đặt)
+print(card)
+
+# Áp dụng bảng điểm lên dữ liệu để tính điểm cho từng khách hàng
+# (scorecard_ply không có các tham số này trong v0.4.4)
+train_score <- scorecard_ply(train_dat, card)
+test_score <- scorecard_ply(test_dat, card)
+
+# BỔ SUNG: THÊM BIẾN BAD VÀO train_score và test_score THỦ CÔNG
+train_score$BAD <- train_dat$BAD
+test_score$BAD <- test_dat$BAD
+
+# Xem một vài khách hàng và điểm của họ
+head(train_score)
+head(test_score)
+
+# Kiểm tra lại tên cột trong test_score để đảm bảo có BAD
+names(test_score)
+
+# Phân phối điểm
+summary(train_score$score)
+summary(test_score$score)
+
+# Bạn có thể vẽ histogram của điểm
+hist(test_score$score, main = "Distribution of Credit Score on Test Set", xlab = "Score")
+
+# Hoặc so sánh điểm giữa khách hàng BAD và GOOD
+library(ggplot2)
+ggplot(test_score, aes(x = score, fill = BAD)) +
+  geom_density(alpha = 0.5) +
+  labs(title = "Score Distribution by BAD/GOOD Status", x = "Score", fill = "BAD") +
+  theme_minimal()
+```
+```{r}
+# Bước 8: Các chỉ tiêu đánh giá
+# ====================================================================
+# Chuyển BAD về số
+actual <- as.numeric(as.character(test_woe$BAD))  # 1 = bad, 0 = good
+predicted <- test_pred_prob
+
+# Tạo dataframe
+ks_df <- data.frame(actual = actual, predicted = predicted)
+
+# Sắp xếp theo xác suất giảm dần
+ks_df <- ks_df[order(-ks_df$predicted), ]
+
+# Tính tỷ lệ tích lũy
+ks_df$bad <- ifelse(ks_df$actual == 1, 1, 0)
+ks_df$good <- ifelse(ks_df$actual == 0, 1, 0)
+ks_df$bad_cum_pct <- cumsum(ks_df$bad) / sum(ks_df$bad)
+ks_df$good_cum_pct <- cumsum(ks_df$good) / sum(ks_df$good)
+
+# KS là độ lệch lớn nhất giữa TPR và FPR
+ks_df$ks_stat <- abs(ks_df$bad_cum_pct - ks_df$good_cum_pct)
+ks_val <- max(ks_df$ks_stat)
+cat("KS Statistic:", round(ks_val, 4), "\n")
+
+```
+```{r}
+library(ggplot2)
+
+ks_df$row_id <- seq_len(nrow(ks_df)) / nrow(ks_df) # Xác suất tích lũy theo rank
+
+ggplot(ks_df, aes(x = row_id)) +
+  geom_line(aes(y = bad_cum_pct, color = "Bad (TPR)")) +
+  geom_line(aes(y = good_cum_pct, color = "Good (FPR)")) +
+  geom_line(aes(y = ks_stat, color = "KS Distance"), linetype = "dotted") +
+  labs(
+    title = "KS Curve",
+    x = "Cumulative Population",
+    y = "Cumulative Percentage",
+    color = ""
+  ) +
+  annotate("text", x = ks_df$row_id[which.max(ks_df$ks_stat)],
+           y = ks_val,
+           label = paste0("KS = ", round(ks_val, 4)),
+           hjust = -0.1, vjust = 0.5, color = "black") +
+  theme_minimal()
+
+```
+```{r}
+# Cắt score thành các bins giống nhau
+cut_bins <- woebin_ply(data.frame(score = c(train_score$score, test_score$score)), 
+                       woebin(data.frame(score = c(train_score$score, test_score$score),
+                                         BAD = c(train_score$BAD, test_score$BAD)),
+                              y = "BAD", x = "score", bin_num_limit = 10))
+
+# Phân phối tỷ lệ trong từng bin
+train_score$bin <- cut_bins$score_woe[1:nrow(train_score)]
+test_score$bin <- cut_bins$score_woe[(nrow(train_score)+1):(nrow(train_score) + nrow(test_score))]
+
+psi_table <- data.frame(table(train_score$bin) / nrow(train_score))
+names(psi_table) <- c("bin", "train_pct")
+psi_table$test_pct <- table(test_score$bin) / nrow(test_score)
+psi_table$psi <- (psi_table$train_pct - psi_table$test_pct) * log(psi_table$train_pct / psi_table$test_pct)
+
+# Tổng PSI
+psi_val <- sum(psi_table$psi, na.rm = TRUE)
+cat("PSI (Population Stability Index):", round(psi_val, 4), "\n")
+
+# In bảng PSI
+print(psi_table)
+
+```
+```{r}
+# Dữ liệu đã có: test_pred_prob, test_woe$BAD
+# Tạo dataframe
+gini_df <- data.frame(actual = as.numeric(as.character(test_woe$BAD)),
+                      predicted = test_pred_prob)
+
+# Sắp xếp theo xác suất giảm dần
+gini_df <- gini_df[order(-gini_df$predicted), ]
+
+# Thêm cột thứ tự tích lũy (cumulative population)
+gini_df$cum_pop <- seq_along(gini_df$actual) / nrow(gini_df)
+
+# Tính tỷ lệ bad tích lũy
+gini_df$cum_bad <- cumsum(gini_df$actual) / sum(gini_df$actual)
+
+# Đường lý tưởng (perfect model): 100% bad nằm trong top đầu
+# Đường ngẫu nhiên (random model): đường chéo
+
+# Vẽ Gini (Lorenz) Curve
+library(ggplot2)
+ggplot(gini_df, aes(x = cum_pop, y = cum_bad)) +
+  geom_line(color = "blue", size = 1.2) +
+  geom_abline(slope = 1, intercept = 0, color = "red", linetype = "dashed") +
+  labs(
+    title = "Gini Curve (Lorenz Curve)",
+    x = "Cumulative Population",
+    y = "Cumulative Bad",
+    caption = paste("Gini =", round(2 * auc(roc(response = test_woe$BAD, predictor = test_pred_prob)) - 1, 4))
+  ) +
+  theme_minimal()
+# ====================================================================
+```
+
+```{r}
+# Bước 9: In ra Score và logodds
+
+test_prob_bad <- predict(logistic_model, newdata = test_woe, type = "response")
+test_prob_good <- 1 - test_prob_bad
+
+# Odds_Good_Bad = P(Good) / P(Bad)
+odds_good_bad <- test_prob_good / test_prob_bad
+
+# Odds_Bad_Good = P(Bad) / P(Good)
+odds_bad_good <- test_prob_bad / test_prob_good
+
+# Gộp dữ liệu lại để tiện phân tích
+analysis_df <- data.frame(
+  score = test_score$score, # Điểm số từ scorecard_ply
+  prob_bad = test_prob_bad,
+  prob_good = test_prob_good,
+  odds_good_bad = odds_good_bad,
+  odds_bad_good = odds_bad_good
+)
+
+# Sắp xếp theo điểm số tăng dần
+analysis_df_sorted <- analysis_df %>%
+  arrange(score)
+
+# In ra một vài hàng đầu và cuối để xem xu hướng
+cat("\n--- Dữ liệu sắp xếp theo Score tăng dần ---\n")
+print(head(analysis_df_sorted))
+print(tail(analysis_df_sorted))
+
+# Plot Odds_Good_Bad vs Score
+ggplot(analysis_df, aes(x = score, y = odds_good_bad)) +
+  geom_point(alpha = 0.5) +
+  geom_smooth(method = "loess", se = FALSE, color = "blue") +
+  labs(title = "Odds (Good/Bad) vs. Score", x = "Score", y = "Odds (Good/Bad)") +
+  theme_minimal()
+
+# Plot Odds_Bad_Good vs Score
+ggplot(analysis_df, aes(x = score, y = odds_bad_good)) +
+  geom_point(alpha = 0.5) +
+  geom_smooth(method = "loess", se = FALSE, color = "red") +
+  labs(title = "Odds (Bad/Good) vs. Score", x = "Score", y = "Odds (Bad/Good)") +
+  theme_minimal()
+```
+```{r}
+analysis_df_sorted
+```
+```{r}
+# CHẠY LẠI MÔ HÌNH VỚI DANH SÁCH BIẾN MỚI
+
+# Bước 0: (Giả định bạn đã chạy các bước trước đó và có đối tượng 'bins' và 'train_woe')
+
+# ====================================================================
+# Bước 1: Xem IV của các biến (SỬA ĐỔI CHÍNH XÁC CHO PHIÊN BẢN 0.4.4)
+# ====================================================================
+
+# Tạo một dataframe rỗng để chứa tổng hợp IV
+iv_summary <- data.frame(
+  variable = character(),
+  iv = numeric(),
+  stringsAsFactors = FALSE
+)
+
+# Lặp qua từng biến trong đối tượng 'bins' để trích xuất IV
+for (var_name in names(bins)) {
+  # Mỗi phần tử trong 'bins' là một data.table con
+  var_bin_info <- bins[[var_name]]
+
+  # Đảm bảo dataframe không rỗng và có cột 'total_iv'
+  if (nrow(var_bin_info) > 0 && "total_iv" %in% names(var_bin_info)) {
+    # Lấy giá trị total_iv từ HÀNG ĐẦU TIÊN (hoặc bất kỳ hàng nào, vì nó lặp lại)
+    current_iv <- var_bin_info$total_iv[1]
+
+    # Thêm vào dataframe tổng hợp
+    iv_summary <- rbind(iv_summary, data.frame(variable = var_name, iv = current_iv))
+  }
+}
+
+print(iv_summary)
+
+# Sắp xếp theo IV giảm dần để dễ nhìn
+iv_summary_sorted <- iv_summary %>%
+  arrange(desc(iv))
+print(iv_summary_sorted)
+
+# ====================================================================
+# Các bước tiếp theo (Lọc biến, xây dựng lại mô hình, v.v.)
+# giữ nguyên như hướng dẫn trước đó:
+# ====================================================================
+
+# Đặt ngưỡng IV
+iv_threshold <- 0.1 # Ví dụ: bỏ tất cả các biến có IV < 0.02
+
+# Lọc ra các biến có IV lớn hơn hoặc bằng ngưỡng
+selected_vars_iv <- iv_summary_sorted %>%
+  filter(iv >= iv_threshold) %>%
+  pull(variable) # Lấy tên các biến
+
+cat("\nCác biến được chọn dựa trên IV (ngưỡng >=", iv_threshold, "):\n")
+print(selected_vars_iv)
+```
+
+
+```{r}
+# ====================================================================
+# Bước 3: Xây dựng lại công thức mô hình với các biến đã chọn
+# ====================================================================
+
+# Đảm bảo các biến đã chọn là các biến WoE
+selected_woe_vars <- paste0(selected_vars_iv, "_woe")
+
+# Xây dựng công thức mô hình mới
+formula_str_new <- paste("BAD ~", paste(selected_woe_vars, collapse = " + "))
+model_formula_new <- as.formula(formula_str_new)
+
+cat("\nCông thức mô hình Logistic Regression MỚI:\n")
+print(model_formula_new)
+```
+
+
+```{r}
+# ====================================================================
+# Bước 4: Huấn luyện lại mô hình Logistic Regression
+# ====================================================================
+
+logistic_model_new <- glm(model_formula_new, data = train_woe, family = binomial(link = "logit"))
+
+# Xem tóm tắt mô hình mới
+summary(logistic_model_new)
+```
+```{r}
+# ====================================================================
+# Bước 5: Đánh giá mô hình mới (trên tập Test)
+# ====================================================================
+
+# Dự đoán xác suất "bad" trên tập kiểm tra với mô hình mới
+test_pred_prob_new <- predict(logistic_model_new, newdata = test_woe, type = "response")
+
+# Chuyển đổi xác suất thành dự đoán lớp (ngưỡng 0.5)
+test_pred_class_new <- ifelse(test_pred_prob_new > 0.5, "1", "0")
+test_pred_class_new <- as.factor(test_pred_class_new)
+
+# Tạo confusion matrix
+cat("\nConfusion Matrix cho mô hình MỚI:\n")
+confusionMatrix(test_pred_class_new, test_woe$BAD, positive = "1")
+
+# Tính toán ROC curve và AUC
+library(pROC)
+roc_obj_new <- roc(response = test_woe$BAD, predictor = test_pred_prob_new)
+cat("\nAUC cho mô hình MỚI:", auc(roc_obj_new), "\n")
+plot(roc_obj_new, main = "ROC Curve for NEW Model on Test Set")
+```
+```{r}
+# ====================================================================
+# Bước 6: Tính điểm Scorecard MỚI (nếu cần)
+# ====================================================================
+
+# Lọc 'bins' chỉ bao gồm các biến được chọn
+bins_selected <- bins[selected_vars_iv]
+
+# Tạo scorecard mới với mô hình đã huấn luyện lại và bins đã lọc
+card_new <- scorecard(bins_selected, 
+                      logistic_model_new,
+                      points0 = 600,  
+                      pdo = 50,       
+                      odds0 = 1/19)
+print(card_new)
+
+# Áp dụng scorecard mới để tính điểm
+train_score_new <- scorecard_ply(train_dat, card_new)
+test_score_new <- scorecard_ply(test_dat, card_new)
+
+# BỔ SUNG: THÊM BIẾN BAD VÀO train_score_new và test_score_new THỦ CÔNG
+train_score_new$BAD <- train_dat$BAD
+test_score_new$BAD <- test_dat$BAD
+
+head(test_score_new)
+
+# Vẽ biểu đồ phân phối điểm mới
+ggplot(test_score_new, aes(x = score, fill = BAD)) +
+  geom_density(alpha = 0.5) +
+  labs(title = "New Score Distribution by BAD/GOOD Status", x = "Score", fill = "BAD") +
+  theme_minimal()
+
+# ====================================================================
+# Bổ sung: Cách tùy chỉnh Base Point, PDO, Odds THỦ CÔNG (Nếu bạn muốn)
+# (Không thay đổi so với lần trước)
+# ====================================================================
+```
+```{r}
+# --- KS cho mô hình mới ---
+actual_new <- as.numeric(as.character(test_woe$BAD))
+predicted_new <- test_pred_prob_new
+
+ks_df_new <- data.frame(actual = actual_new, predicted = predicted_new)
+ks_df_new <- ks_df_new[order(-ks_df_new$predicted), ]
+
+ks_df_new$bad <- ifelse(ks_df_new$actual == 1, 1, 0)
+ks_df_new$good <- ifelse(ks_df_new$actual == 0, 1, 0)
+ks_df_new$bad_cum_pct <- cumsum(ks_df_new$bad) / sum(ks_df_new$bad)
+ks_df_new$good_cum_pct <- cumsum(ks_df_new$good) / sum(ks_df_new$good)
+ks_df_new$ks_stat <- abs(ks_df_new$bad_cum_pct - ks_df_new$good_cum_pct)
+
+ks_val_new <- max(ks_df_new$ks_stat)
+cat("KS Statistic (mô hình mới):", round(ks_val_new, 4), "\n")
+
+# Vẽ KS Curve cho mô hình mới
+ggplot(ks_df_new, aes(x = seq_along(actual) / length(actual))) +
+  geom_line(aes(y = bad_cum_pct, color = "Bad (TPR)")) +
+  geom_line(aes(y = good_cum_pct, color = "Good (FPR)")) +
+  geom_line(aes(y = ks_stat, color = "KS Distance"), linetype = "dotted") +
+  labs(
+    title = "KS Curve - Mô hình mới",
+    x = "Cumulative Population",
+    y = "Cumulative %",
+    color = ""
+  ) +
+  annotate("text", x = which.max(ks_df_new$ks_stat) / nrow(ks_df_new),
+           y = ks_val_new,
+           label = paste0("KS = ", round(ks_val_new, 4)),
+           hjust = -0.1, vjust = 0.5, color = "black") +
+  theme_minimal()
+
+```
+```{r}
+# --- PSI cho mô hình mới ---
+
+cut_bins_new <- woebin_ply(data.frame(score = c(train_score_new$score, test_score_new$score)), 
+                           woebin(data.frame(score = c(train_score_new$score, test_score_new$score),
+                                             BAD = c(train_score_new$BAD, test_score_new$BAD)),
+                                  y = "BAD", x = "score", bin_num_limit = 10))
+
+train_score_new$bin <- cut_bins_new$score_woe[1:nrow(train_score_new)]
+test_score_new$bin <- cut_bins_new$score_woe[(nrow(train_score_new)+1):(nrow(cut_bins_new))]
+
+psi_table_new <- data.frame(table(train_score_new$bin) / nrow(train_score_new))
+names(psi_table_new) <- c("bin", "train_pct")
+psi_table_new$test_pct <- table(test_score_new$bin) / nrow(test_score_new)
+psi_table_new$psi <- (psi_table_new$train_pct - psi_table_new$test_pct) * 
+                      log(psi_table_new$train_pct / psi_table_new$test_pct)
+
+psi_val_new <- sum(psi_table_new$psi, na.rm = TRUE)
+cat("PSI (mô hình mới):", round(psi_val_new, 4), "\n")
+print(psi_table_new)
+
+```
+```{r}
+# --- Gini cho mô hình mới ---
+
+gini_df_new <- data.frame(
+  actual = as.numeric(as.character(test_woe$BAD)),
+  predicted = test_pred_prob_new
+)
+gini_df_new <- gini_df_new[order(-gini_df_new$predicted), ]
+gini_df_new$cum_pop <- seq_along(gini_df_new$actual) / nrow(gini_df_new)
+gini_df_new$cum_bad <- cumsum(gini_df_new$actual) / sum(gini_df_new$actual)
+
+gini_val_new <- 2 * auc(roc(response = test_woe$BAD, predictor = test_pred_prob_new)) - 1
+cat("Gini (mô hình mới):", round(gini_val_new, 4), "\n")
+
+ggplot(gini_df_new, aes(x = cum_pop, y = cum_bad)) +
+  geom_line(color = "blue", size = 1.2) +
+  geom_abline(slope = 1, intercept = 0, color = "red", linetype = "dashed") +
+  labs(
+    title = "Gini Curve - Mô hình mới",
+    x = "Cumulative Population",
+    y = "Cumulative Bad",
+    caption = paste("Gini =", round(gini_val_new, 4))
+  ) +
+  theme_minimal()
+
+```
+```{r}
+# Dự đoán xác suất từ mô hình mới
+test_prob_bad_new <- predict(logistic_model_new, newdata = test_woe, type = "response")
+test_prob_good_new <- 1 - test_prob_bad_new
+
+# Tính odds
+odds_good_bad_new <- test_prob_good_new / test_prob_bad_new
+odds_bad_good_new <- test_prob_bad_new / test_prob_good_new
+
+# Tạo bảng phân tích
+analysis_df_new <- data.frame(
+  score = test_score_new$score,
+  prob_bad = test_prob_bad_new,
+  prob_good = test_prob_good_new,
+  odds_good_bad = odds_good_bad_new,
+  odds_bad_good = odds_bad_good_new
+)
+
+# Sắp xếp theo điểm
+analysis_df_sorted_new <- analysis_df_new %>% arrange(score)
+
+cat("\n--- Phân tích Odds theo Score (mô hình mới) ---\n")
+print(head(analysis_df_sorted_new))
+print(tail(analysis_df_sorted_new))
+
+# Vẽ Odds vs Score
+ggplot(analysis_df_new, aes(x = score, y = odds_good_bad)) +
+  geom_point(alpha = 0.5) +
+  geom_smooth(method = "loess", se = FALSE, color = "blue") +
+  labs(title = "Odds (Good/Bad) vs. Score - Mô hình mới", x = "Score", y = "Odds (Good/Bad)") +
+  theme_minimal()
+
+ggplot(analysis_df_new, aes(x = score, y = odds_bad_good)) +
+  geom_point(alpha = 0.5) +
+  geom_smooth(method = "loess", se = FALSE, color = "red") +
+  labs(title = "Odds (Bad/Good) vs. Score - Mô hình mới", x = "Score", y = "Odds (Bad/Good)") +
+  theme_minimal()
+
+```
+
