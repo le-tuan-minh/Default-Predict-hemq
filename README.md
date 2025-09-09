@@ -26,7 +26,7 @@ Dự án này tập trung vào việc xây dựng các mô hình dự đoán kh�
   - **AUROC**: 0.9025
   - **KS Statistic**: 0.6578
   - **Gini**: 0.8049
-  - **PSI (Population Stability Index)**: 0.0022 → cho thấy mô hình ổn định theo thời gian.
+  - **PSI (Population Stability Index)**: 0.0022 → cho thấy mô hình ổn định.
 - Thử loại bỏ các biến có giá trị **IV thấp** nhưng không cải thiện được các chỉ số → giữ nguyên tập biến ban đầu.
 
 ---
